@@ -3,6 +3,7 @@
 config.json
 state.json
 
-src/website_change_detector/__pycache__/
-src/website_change_detector.egg-info/
+__pycache__/
+*.pyc
+*.egg-info/
 

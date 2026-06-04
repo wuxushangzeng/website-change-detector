@@ -1,4 +1,4 @@
-"""Website change detector — monitors web pages and sends email alerts."""
+"""网页监控脚本，发现内容变动->邮件提醒"""
 
 import hashlib
 import json
