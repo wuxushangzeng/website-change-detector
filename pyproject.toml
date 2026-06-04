@@ -1,0 +1,23 @@
+[project]
+name = "website-change-detector"
+version = "0.1.0"
+description = "网页监控脚本"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+        "APScheduler>=3.11.2",
+        "httpx>=0.28.1",
+        "beautifulsoup4>=4.14.3",
+]
+
+[project.scripts]
+detect = "website_change_detector.app:main"
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+

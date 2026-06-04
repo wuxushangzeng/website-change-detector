@@ -1,0 +1,23 @@
+{
+  "smtp": {
+    "host": "smtp.qq.com",
+    "port": 465,
+    "user": "xxxxxx@qq.com",
+    "password": "",
+    "receiver": "接收邮箱"
+  },
+  "interval_minutes": 30,
+  "targets": [
+    {
+      "name": "",
+      "url": "",
+      "strategy": "hash"
+    },
+    {
+      "name": "",
+      "url": "",
+      "strategy": "fulltext",
+      "interval_minutes": 10
+    }
+  ]
+}
