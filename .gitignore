@@ -1,6 +1,7 @@
 .venv/
 
 config.json
+config_1.json
 state.json
 
 __pycache__/

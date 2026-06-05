@@ -84,4 +84,7 @@ cp config_example.json config.json
 | `interval_minutes` | 继承全局值 | 单独设置检查间隔 |
 | `timeout` | 30 | 请求超时（秒） |
 | `state_file` | `config.json` 同目录 | 自定义状态文件路径 |
+| `content_type` | `html` | 可选 `json` |
+| `json_path` | | | 
+| `cookies` | | |
 

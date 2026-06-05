@@ -6,10 +6,12 @@ import logging
 import signal
 import smtplib
 import sys
+import time as _time
 from datetime import datetime, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
+from urllib.parse import parse_qsl, urlparse, urlunparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -24,6 +26,16 @@ USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/125.0.0.0 Safari/537.36"
 )
+
+WBI_MIXIN_TABLE = [
+    46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35,
+    27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13,
+    37, 48, 7, 16, 24, 55, 40, 61, 26, 17, 0, 1, 60, 51, 30, 4,
+    22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11, 36, 20, 52, 44, 34,
+]
+
+# Simple TTL cache for WBI signing key (valid ~30 min)
+_wbi_key_cache = {"key": None, "expires": 0}
 
 
 # ── config & state ───────────────────────────────────────────────────────
@@ -80,6 +92,103 @@ def fetch_page(url, timeout=30):
     resp = httpx.get(url, headers=headers, timeout=timeout, follow_redirects=True)
     resp.raise_for_status()
     return resp.text
+
+
+def _get_wbi_key(cookies=None):
+    now = _time.time()
+    if _wbi_key_cache["key"] and now < _wbi_key_cache["expires"]:
+        return _wbi_key_cache["key"]
+    headers = {"User-Agent": USER_AGENT, "Referer": "https://www.bilibili.com/"}
+    if cookies:
+        headers["Cookie"] = cookies
+    resp = httpx.get(
+        "https://api.bilibili.com/x/web-interface/nav",
+        headers=headers,
+        timeout=15,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("code") != 0:
+        raise RuntimeError(
+            f"Bilibili 鉴权失败 (code={data.get('code')}): {data.get('message')}。"
+            f"请检查 config.json 中该 target 的 cookies 是否有效。"
+        )
+    img_key = data["data"]["wbi_img"]["img_url"].rsplit("/", 1)[-1].split(".")[0]
+    sub_key = data["data"]["wbi_img"]["sub_url"].rsplit("/", 1)[-1].split(".")[0]
+    raw = img_key + sub_key
+    mixed = "".join(raw[i] for i in WBI_MIXIN_TABLE)[:32]
+    _wbi_key_cache["key"] = mixed
+    _wbi_key_cache["expires"] = now + 1800
+    return mixed
+
+
+def _sign_bilibili(url, cookies=None):
+    parsed = urlparse(url)
+    params = dict(parse_qsl(parsed.query))
+    params["wts"] = str(int(_time.time()))
+    sorted_items = sorted(params.items())
+    query_string = "&".join(f"{k}={v}" for k, v in sorted_items)
+    mixin_key = _get_wbi_key(cookies)
+    w_rid = hashlib.md5((query_string + mixin_key).encode()).hexdigest()
+    sorted_items.append(("w_rid", w_rid))
+    new_query = "&".join(f"{k}={v}" for k, v in sorted_items)
+    return urlunparse(parsed._replace(query=new_query))
+
+
+def fetch_json(url, timeout=30, cookies=None):
+    is_bilibili = "api.bilibili.com" in url
+    original_url = url
+
+    def _request(signed_url):
+        parsed = urlparse(signed_url)
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Referer": origin + "/",
+        }
+        if cookies:
+            headers["Cookie"] = cookies
+        resp = httpx.get(
+            signed_url, headers=headers, timeout=timeout, follow_redirects=True
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    if is_bilibili:
+        url = _sign_bilibili(url, cookies)
+
+    data = _request(url)
+
+    if is_bilibili and isinstance(data, dict) and data.get("code") == -352:
+        logger.warning("Bilibili 风控拦截 (-352)，刷新 WBI 密钥后重试...")
+        _wbi_key_cache["expires"] = 0
+        url = _sign_bilibili(original_url, cookies)
+        _time.sleep(5)
+        data = _request(url)
+
+    if isinstance(data, dict) and data.get("code") not in (0, None):
+        raise RuntimeError(
+            f"API 返回错误 (code={data.get('code')}): {data.get('message', '未知')}"
+        )
+    return data
+
+
+def extract_json_value(data, path):
+    keys = path.split(".")
+    for key in keys:
+        if isinstance(data, dict):
+            data = data.get(key)
+        elif isinstance(data, list):
+            idx = int(key)
+            if idx < len(data):
+                data = data[idx]
+            else:
+                return None
+        else:
+            return None
+    return data
 
 
 # ── parsing ───────────────────────────────────────────────────────────────
@@ -140,16 +249,28 @@ def check_target(target, state):
     """Fetch page, compare with previous state. Returns (changed, old_text, new_text)."""
     url = target["url"]
     name = target["name"]
+    content_type = target.get("content_type", "html")
 
     logger.info("检查: %s (%s)", name, url)
 
     try:
-        html = fetch_page(url, timeout=target.get("timeout", 30))
+        if content_type == "json":
+            data = fetch_json(
+                url,
+                timeout=target.get("timeout", 30),
+                cookies=target.get("cookies"),
+            )
+            json_path = target.get("json_path")
+            if json_path:
+                data = extract_json_value(data, json_path)
+            text = json.dumps(data, ensure_ascii=False, sort_keys=True)
+        else:
+            html = fetch_page(url, timeout=target.get("timeout", 30))
+            text = extract_visible_text(html)
     except Exception as exc:
         logger.error("抓取失败 [%s]: %s", name, exc)
         return False, "", ""
 
-    text = extract_visible_text(html)
     current_hash = compute_hash(text)
     previous = state.get(url)
 
